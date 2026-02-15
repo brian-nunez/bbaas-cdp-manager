@@ -77,12 +77,3 @@ Basic health response.
 - `TASK_DB_PATH` (default `./tasks.db`)
 - `TASK_LOG_PATH` (default `./logs`)
 
-## Local Notes
-
-`go.mod` uses:
-
-```text
-replace github.com/brian-nunez/task-orchestration => ../../task-orchestration
-```
-
-This points to the sibling local checkout in this workspace.

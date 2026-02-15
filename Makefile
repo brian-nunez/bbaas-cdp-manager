@@ -1,7 +1,4 @@
-.PHONY: templ server tailwind dev
-
-templ:
-	templ generate --watch --proxy="http://localhost:8090" --open-browser=false
+.PHONY: server
 
 server:
 	air \
@@ -13,9 +10,6 @@ server:
 		--build.stop_on_error "false" \
 		--misc.clean_on_exit true
 
-tailwind:
-	tailwindcss -i ./assets/css/input.css -o ./assets/css/output.css --watch
-
 dev:
-	make -j3 templ tailwind server
+	make server
 

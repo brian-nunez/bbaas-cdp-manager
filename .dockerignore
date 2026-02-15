@@ -1,0 +1,7 @@
+.git
+.gitignore
+.DS_Store
+tmp/
+logs/
+tasks.db
+README.md
