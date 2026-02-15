@@ -3,7 +3,7 @@ package httpserver
 import (
 	"context"
 
-	v1 "github.com/brian-nunez/go-echo-starter-template/internal/handlers/v1"
+	v1 "github.com/brian-nunez/bbaas-cdp-manager/internal/handlers/v1"
 	"github.com/labstack/echo/v4"
 )
 

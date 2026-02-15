@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brian-nunez/go-echo-starter-template/internal/browser"
-	v1 "github.com/brian-nunez/go-echo-starter-template/internal/handlers/v1"
-	"github.com/brian-nunez/go-echo-starter-template/internal/httpserver"
+	"github.com/brian-nunez/bbaas-cdp-manager/internal/browser"
+	v1 "github.com/brian-nunez/bbaas-cdp-manager/internal/handlers/v1"
+	"github.com/brian-nunez/bbaas-cdp-manager/internal/httpserver"
 )
 
 func main() {

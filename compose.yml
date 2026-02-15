@@ -1,5 +1,5 @@
 services:
-  bbaas-cdp:
+  bbaas-cdp-manager:
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,7 +9,7 @@ services:
     network_mode: "host"
     environment:
       CDP_BIND_HOST: "127.0.0.1"
-      # CDP_PUBLIC_HOST: "bbaas-browser-service.b8z.me"
+      # CDP_PUBLIC_HOST: "bbaas-browser-manager.b8z.me"
       CDP_PUBLIC_HOST: "localhost"
       BROWSER_IDLE_TIMEOUT: "1m"
       TASK_WORKER_CONCURRENCY: "1"

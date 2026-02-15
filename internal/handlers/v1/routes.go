@@ -1,7 +1,7 @@
 package v1
 
 import (
-	"github.com/brian-nunez/go-echo-starter-template/internal/browser"
+	"github.com/brian-nunez/bbaas-cdp-manager/internal/browser"
 	"github.com/labstack/echo/v4"
 )
 
