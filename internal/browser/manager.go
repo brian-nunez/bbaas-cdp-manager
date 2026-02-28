@@ -480,7 +480,8 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	}
 
 	launchOptions := playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(t.headless),
+		Headless:          playwright.Bool(t.headless),
+		IgnoreDefaultArgs: []string{"--remote-debugging-pipe"},
 		Args: []string{
 			"--remote-debugging-address=0.0.0.0",
 			fmt.Sprintf("--remote-debugging-port=%d", port),
