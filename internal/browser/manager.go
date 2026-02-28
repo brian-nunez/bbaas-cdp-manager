@@ -27,7 +27,8 @@ const (
 	defaultWorkerCount     = 4
 	defaultTaskLogPath     = "./logs"
 	defaultTaskDBPath      = "./tasks.db"
-	defaultCDPBindHost     = "127.0.0.1"
+	defaultCDPBindHost     = "0.0.0.0"
+	cdpPortOffset          = 10000
 )
 
 var (
@@ -472,18 +473,24 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	default:
 	}
 
-	port, err := reserveOpenPort(t.manager.config.CDPBindHost)
+	port, err := reserveOpenPort("0.0.0.0")
 	if err != nil {
 		err = fmt.Errorf("reserve open port: %w", err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	}
 
+	internalPort := port
+	publicPort := port + cdpPortOffset
+
 	launchOptions := playwright.BrowserTypeLaunchOptions{
-		Headless:          playwright.Bool(t.headless),
-		IgnoreDefaultArgs: []string{"--remote-debugging-pipe"},
+		Headless: playwright.Bool(t.headless),
 		Args: []string{
+			"--no-sandbox",
 			"--remote-debugging-address=0.0.0.0",
+			"--no-first-run",
+			"--no-default-browser-check",
+			"--remote-allow-origins=*",
 			fmt.Sprintf("--remote-debugging-port=%d", port),
 		},
 	}
@@ -495,10 +502,13 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 		return err
 	}
 
-	localCDPHost := discoveryHost(t.manager.config.CDPBindHost)
-	localCDPHTTPURL := fmt.Sprintf("http://%s", net.JoinHostPort(localCDPHost, strconv.Itoa(port)))
-	publicCDPHTTPURL := fmt.Sprintf("http://%s", net.JoinHostPort(t.manager.config.CDPPublicHost, strconv.Itoa(port)))
+	localCDPHTTPURL := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
 
+	publicCDPHTTPURL := fmt.Sprintf(
+		"http://%s:%d",
+		t.manager.config.CDPPublicHost,
+		publicPort,
+	)
 	cdpWSURL, err := waitForWebSocketDebuggerURL(ctx, localCDPHTTPURL, 6*time.Second)
 	if err != nil {
 		_ = browser.Close()
@@ -507,7 +517,11 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 		return err
 	}
 
-	cdpWSURL = rewriteEndpointHost(cdpWSURL, t.manager.config.CDPPublicHost, port)
+	cdpWSURL = rewriteEndpointHost(
+		cdpWSURL,
+		t.manager.config.CDPPublicHost,
+		publicPort,
+	)
 
 	now := time.Now().UTC()
 	s := &session{
@@ -592,8 +606,8 @@ func reserveOpenPort(host string) (int, error) {
 
 func discoveryHost(bindHost string) string {
 	switch strings.TrimSpace(bindHost) {
-	case "", "0.0.0.0", "::":
-		return "127.0.0.1"
+	case "", "0.0.0.0", "::", "127.0.0.1":
+		return "0.0.0.0"
 	default:
 		return bindHost
 	}

@@ -47,7 +47,7 @@ func main() {
 	}
 
 	go func() {
-		err := server.Start(fmt.Sprintf(":%s", PORT))
+		err := server.Start(fmt.Sprintf("0.0.0.0:%s", PORT))
 		if err != nil && err.Error() != "http: Server closed" {
 			log.Fatalf("could not start server: %v", err)
 		}
