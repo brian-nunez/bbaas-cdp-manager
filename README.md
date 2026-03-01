@@ -73,7 +73,15 @@ Basic health response.
 - `PLAYWRIGHT_HEADLESS` (default `true`)
 - `CDP_BIND_HOST` (default `127.0.0.1`)
 - `CDP_PUBLIC_HOST` (default `CDP_BIND_HOST`)
+- `CDP_PORT_MIN` (default `20000`)
+- `CDP_PORT_MAX` (default `29999`)
 - `TASK_WORKER_CONCURRENCY` (default `4`)
 - `TASK_DB_PATH` (default `./tasks.db`)
 - `TASK_LOG_PATH` (default `./logs`)
 
+## CDP Networking Notes
+
+- Chromium CDP is launched on loopback (`127.0.0.1`) by default for reliability.
+- CDP ports are allocated from a dedicated range (`CDP_PORT_MIN`-`CDP_PORT_MAX`) to avoid collisions with OS ephemeral outbound ports.
+- The service still returns externally-usable CDP URLs by rewriting host to `CDP_PUBLIC_HOST` while preserving each browser's dynamic port.
+- For public access without exposing high ports, use an HTTP path translator proxy (for example `/<port>/... -> 127.0.0.1:<port>/...`) on the BBAAS machine.

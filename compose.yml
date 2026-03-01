@@ -11,6 +11,8 @@ services:
       CDP_BIND_HOST: "127.0.0.1"
       # CDP_PUBLIC_HOST: "bbaas-browser-manager.b8z.me"
       CDP_PUBLIC_HOST: "localhost"
+      CDP_PORT_MIN: "20000"
+      CDP_PORT_MAX: "29999"
       BROWSER_IDLE_TIMEOUT: "1m"
       TASK_WORKER_CONCURRENCY: "1"
       TASK_LOG_PATH: "./logs"

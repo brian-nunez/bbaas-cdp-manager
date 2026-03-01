@@ -27,8 +27,9 @@ const (
 	defaultWorkerCount     = 4
 	defaultTaskLogPath     = "./logs"
 	defaultTaskDBPath      = "./tasks.db"
-	defaultCDPBindHost     = "0.0.0.0"
-	cdpPortOffset          = 10000
+	defaultCDPBindHost     = "127.0.0.1"
+	defaultCDPPortMin      = 20000
+	defaultCDPPortMax      = 29999
 )
 
 var (
@@ -44,6 +45,8 @@ type ManagerConfig struct {
 	TaskDatabasePath   string
 	CDPBindHost        string
 	CDPPublicHost      string
+	CDPPortMin         int
+	CDPPortMax         int
 	Headless           bool
 }
 
@@ -137,6 +140,19 @@ func (c ManagerConfig) withDefaults() ManagerConfig {
 
 	if strings.TrimSpace(c.CDPPublicHost) == "" {
 		c.CDPPublicHost = c.CDPBindHost
+	}
+
+	if c.CDPPortMin <= 0 {
+		c.CDPPortMin = defaultCDPPortMin
+	}
+
+	if c.CDPPortMax <= 0 {
+		c.CDPPortMax = defaultCDPPortMax
+	}
+
+	if c.CDPPortMin > c.CDPPortMax {
+		c.CDPPortMin = defaultCDPPortMin
+		c.CDPPortMax = defaultCDPPortMax
 	}
 
 	return c
@@ -473,21 +489,20 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	default:
 	}
 
-	port, err := reserveOpenPort("0.0.0.0")
+	bindHost := normalizeCDPBindHost(t.manager.config.CDPBindHost)
+
+	port, err := reserveOpenPortInRange(bindHost, t.manager.config.CDPPortMin, t.manager.config.CDPPortMax)
 	if err != nil {
 		err = fmt.Errorf("reserve open port: %w", err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	}
 
-	internalPort := port
-	publicPort := port + cdpPortOffset
-
 	launchOptions := playwright.BrowserTypeLaunchOptions{
 		Headless: playwright.Bool(t.headless),
 		Args: []string{
 			"--no-sandbox",
-			"--remote-debugging-address=0.0.0.0",
+			fmt.Sprintf("--remote-debugging-address=%s", bindHost),
 			"--no-first-run",
 			"--no-default-browser-check",
 			"--remote-allow-origins=*",
@@ -502,12 +517,17 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 		return err
 	}
 
-	localCDPHTTPURL := fmt.Sprintf("http://127.0.0.1:%d", internalPort)
+	localCDPHTTPURL := fmt.Sprintf("http://%s:%d", cdpProbeHost(bindHost), port)
+
+	publicHost := strings.TrimSpace(t.manager.config.CDPPublicHost)
+	if publicHost == "" {
+		publicHost = cdpProbeHost(bindHost)
+	}
 
 	publicCDPHTTPURL := fmt.Sprintf(
 		"http://%s:%d",
-		t.manager.config.CDPPublicHost,
-		publicPort,
+		publicHost,
+		port,
 	)
 	cdpWSURL, err := waitForWebSocketDebuggerURL(ctx, localCDPHTTPURL, 6*time.Second)
 	if err != nil {
@@ -519,8 +539,8 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 
 	cdpWSURL = rewriteEndpointHost(
 		cdpWSURL,
-		t.manager.config.CDPPublicHost,
-		publicPort,
+		publicHost,
+		port,
 	)
 
 	now := time.Now().UTC()
@@ -589,25 +609,38 @@ func (t *closeBrowserTask) finish(err error) {
 	}
 }
 
-func reserveOpenPort(host string) (int, error) {
-	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		return 0, err
-	}
-	defer listener.Close()
-
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		return 0, errors.New("listener did not return tcp addr")
+func reserveOpenPortInRange(host string, portMin int, portMax int) (int, error) {
+	if portMin <= 0 || portMax <= 0 || portMin > portMax {
+		return 0, fmt.Errorf("invalid port range %d-%d", portMin, portMax)
 	}
 
-	return addr.Port, nil
+	for port := portMin; port <= portMax; port++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		_ = listener.Close()
+		return port, nil
+	}
+
+	return 0, fmt.Errorf("no open port available in range %d-%d", portMin, portMax)
 }
 
-func discoveryHost(bindHost string) string {
+func normalizeCDPBindHost(bindHost string) string {
 	switch strings.TrimSpace(bindHost) {
-	case "", "0.0.0.0", "::", "127.0.0.1":
-		return "0.0.0.0"
+	case "", "0.0.0.0", "::":
+		// Chromium CDP reliably binds to loopback in containerized environments.
+		// Keep loopback as the practical default and rely on reverse proxies for external access.
+		return "127.0.0.1"
+	default:
+		return bindHost
+	}
+}
+
+func cdpProbeHost(bindHost string) string {
+	switch strings.TrimSpace(bindHost) {
+	case "", "0.0.0.0", "::", "localhost":
+		return "127.0.0.1"
 	default:
 		return bindHost
 	}

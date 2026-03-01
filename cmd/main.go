@@ -19,6 +19,8 @@ import (
 func main() {
 	cdpBindHost := envOrDefault("CDP_BIND_HOST", "127.0.0.1")
 	cdpPublicHost := envOrDefault("CDP_PUBLIC_HOST", cdpBindHost)
+	cdpPortMin := intEnvOrDefault("CDP_PORT_MIN", 20000)
+	cdpPortMax := intEnvOrDefault("CDP_PORT_MAX", 29999)
 
 	manager := browser.NewManager(browser.ManagerConfig{
 		DefaultIdleTimeout: durationEnvOrDefault("BROWSER_IDLE_TIMEOUT", time.Minute),
@@ -28,6 +30,8 @@ func main() {
 		TaskDatabasePath:   envOrDefault("TASK_DB_PATH", "./tasks.db"),
 		CDPBindHost:        cdpBindHost,
 		CDPPublicHost:      cdpPublicHost,
+		CDPPortMin:         cdpPortMin,
+		CDPPortMax:         cdpPortMax,
 		Headless:           boolEnvOrDefault("PLAYWRIGHT_HEADLESS", true),
 	})
 
