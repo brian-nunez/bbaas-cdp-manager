@@ -14,6 +14,7 @@ import (
 	"github.com/brian-nunez/bbaas-cdp-manager/internal/browser"
 	v1 "github.com/brian-nunez/bbaas-cdp-manager/internal/handlers/v1"
 	"github.com/brian-nunez/bbaas-cdp-manager/internal/httpserver"
+	"github.com/brian-nunez/bbaas-cdp-manager/internal/recorder"
 )
 
 func main() {
@@ -39,9 +40,18 @@ func main() {
 		log.Fatalf("could not start browser manager: %v", err)
 	}
 
+	recorderStore, err := recorder.OpenStore(envOrDefault("RECORDINGS_DB_PATH", "./recordings.db"))
+	if err != nil {
+		_ = manager.Stop()
+		log.Fatalf("could not open recorder store: %v", err)
+	}
+
+	recorderService := recorder.NewService(recorderStore, manager)
+
 	server := httpserver.Bootstrap(httpserver.BootstrapConfig{
 		V1Dependencies: v1.Dependencies{
 			BrowserManager: manager,
+			Recorder:       recorderService,
 		},
 	})
 
@@ -66,13 +76,17 @@ func main() {
 	defer cancel()
 
 	log.Println("Shutting down server...")
-	err := server.Shutdown(ctx)
+	err = server.Shutdown(ctx)
 	if err != nil {
 		log.Fatalf("server shutdown failed: %v", err)
 	}
 
 	if err := manager.Stop(); err != nil {
 		log.Printf("browser manager shutdown completed with errors: %v", err)
+	}
+
+	if err := recorderService.Close(); err != nil {
+		log.Printf("recorder shutdown completed with errors: %v", err)
 	}
 
 	log.Println("Server exited cleanly")

@@ -57,6 +57,8 @@ type Manager struct {
 	sessions map[string]*session
 	started  bool
 
+	closeListeners []func(BrowserClosedEvent)
+
 	pw   *playwright.Playwright
 	pool *worker.WorkerPool
 
@@ -84,6 +86,12 @@ type BrowserInfo struct {
 	LastActiveAt       time.Time `json:"lastActiveAt"`
 	IdleTimeoutSeconds int64     `json:"idleTimeoutSeconds"`
 	ExpiresAt          time.Time `json:"expiresAt"`
+}
+
+type BrowserClosedEvent struct {
+	BrowserID string    `json:"browserId"`
+	Reason    string    `json:"reason"`
+	ClosedAt  time.Time `json:"closedAt"`
 }
 
 type CreateBrowserParams struct {
@@ -318,6 +326,32 @@ func (m *Manager) GetBrowser(browserID string) (*BrowserInfo, error) {
 	return &info, nil
 }
 
+func (m *Manager) GetRuntimeBrowser(browserID string) (playwright.Browser, error) {
+	if err := m.ensureStarted(); err != nil {
+		return nil, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s, ok := m.sessions[browserID]
+	if !ok {
+		return nil, ErrBrowserNotFound
+	}
+
+	return s.browser, nil
+}
+
+func (m *Manager) RegisterBrowserClosedListener(listener func(BrowserClosedEvent)) {
+	if listener == nil {
+		return
+	}
+
+	m.mu.Lock()
+	m.closeListeners = append(m.closeListeners, listener)
+	m.mu.Unlock()
+}
+
 func (m *Manager) KeepAlive(browserID string) (*BrowserInfo, error) {
 	if err := m.ensureStarted(); err != nil {
 		return nil, err
@@ -430,15 +464,43 @@ func (m *Manager) closeBrowserNow(browserID string) error {
 		return fmt.Errorf("close browser %s: %w", browserID, err)
 	}
 
+	m.emitBrowserClosed(BrowserClosedEvent{
+		BrowserID: browserID,
+		Reason:    "closed",
+		ClosedAt:  time.Now().UTC(),
+	})
+
 	return nil
 }
 
 func (m *Manager) registerDisconnect(browserID string, b playwright.Browser) {
 	b.OnDisconnected(func(playwright.Browser) {
 		m.mu.Lock()
-		defer m.mu.Unlock()
-		delete(m.sessions, browserID)
+		_, existed := m.sessions[browserID]
+		if existed {
+			delete(m.sessions, browserID)
+		}
+		m.mu.Unlock()
+
+		if existed {
+			m.emitBrowserClosed(BrowserClosedEvent{
+				BrowserID: browserID,
+				Reason:    "disconnected",
+				ClosedAt:  time.Now().UTC(),
+			})
+		}
 	})
+}
+
+func (m *Manager) emitBrowserClosed(event BrowserClosedEvent) {
+	m.mu.RLock()
+	listeners := make([]func(BrowserClosedEvent), 0, len(m.closeListeners))
+	listeners = append(listeners, m.closeListeners...)
+	m.mu.RUnlock()
+
+	for _, listener := range listeners {
+		listener(event)
+	}
 }
 
 func (m *Manager) ensureStarted() error {

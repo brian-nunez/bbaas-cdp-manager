@@ -55,6 +55,34 @@ Refreshes browser idle timer (extends expiration from now).
 ### `DELETE /browsers/:id`
 Closes a browser session.
 
+### Recording Endpoints
+
+Browser-scoped routes (`/api/v1/browsers/:id/recordings`):
+
+- `POST /browsers/:id/recordings` starts recording for the browser.
+- `POST /browsers/:id/recordings/:recordingId/stop` stops an active recording.
+- `GET /browsers/:id/recordings` lists recordings for the browser.
+- `GET /browsers/:id/recordings/:recordingId` returns one recording metadata entry.
+- `GET /browsers/:id/recordings/:recordingId/actions?limit=200&offset=0` paginates actions.
+- `GET /browsers/:id/recordings/:recordingId/export` returns one export JSON payload.
+
+Recording-id routes (`/api/v1/recordings/:recordingId`):
+
+- `GET /recordings/:recordingId` returns recording metadata.
+- `POST /recordings/:recordingId/stop` stops the recording by ID.
+- `GET /recordings/:recordingId/actions?limit=200&offset=0` paginates actions by recording ID.
+- `GET /recordings/:recordingId/export` exports by recording ID.
+- `POST /recordings/:recordingId/replay` replays into a target browser:
+  - body: `{ "browserId": "brw_target", "actionDelayMs": 120, "timeoutSeconds": 120 }`
+
+Example:
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/browsers/brw_123/recordings" \
+  -H "Content-Type: application/json" \
+  -d '{"redactionMode":"maskInputs","includeScroll":true,"includeKeys":true}'
+```
+
 ### `GET /health`
 Basic health response.
 
@@ -78,6 +106,7 @@ Basic health response.
 - `TASK_WORKER_CONCURRENCY` (default `4`)
 - `TASK_DB_PATH` (default `./tasks.db`)
 - `TASK_LOG_PATH` (default `./logs`)
+- `RECORDINGS_DB_PATH` (default `./recordings.db`)
 
 ## CDP Networking Notes
 
