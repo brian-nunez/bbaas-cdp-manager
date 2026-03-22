@@ -11,13 +11,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	worker "github.com/brian-nunez/task-orchestration"
 	"github.com/playwright-community/playwright-go"
 )
 
@@ -26,7 +26,6 @@ const (
 	defaultCleanupInterval = 5 * time.Second
 	defaultWorkerCount     = 4
 	defaultTaskLogPath     = "./logs"
-	defaultTaskDBPath      = "./tasks.db"
 	defaultCDPBindHost     = "127.0.0.1"
 	defaultCDPPortMin      = 20000
 	defaultCDPPortMax      = 29999
@@ -34,6 +33,7 @@ const (
 
 var (
 	ErrBrowserNotFound   = errors.New("browser not found")
+	ErrCDPPortOutOfRange = errors.New("cdp port out of range")
 	ErrManagerNotStarted = errors.New("browser manager not started")
 )
 
@@ -42,7 +42,7 @@ type ManagerConfig struct {
 	CleanupInterval    time.Duration
 	WorkerConcurrency  int
 	TaskLogPath        string
-	TaskDatabasePath   string
+	DatabaseURL        string
 	CDPBindHost        string
 	CDPPublicHost      string
 	CDPPortMin         int
@@ -58,7 +58,8 @@ type Manager struct {
 	started  bool
 
 	pw   *playwright.Playwright
-	pool *worker.WorkerPool
+	pool *taskWorkerPool
+	db   *postgresSessionStore
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -130,8 +131,8 @@ func (c ManagerConfig) withDefaults() ManagerConfig {
 		c.TaskLogPath = defaultTaskLogPath
 	}
 
-	if strings.TrimSpace(c.TaskDatabasePath) == "" {
-		c.TaskDatabasePath = defaultTaskDBPath
+	if strings.TrimSpace(c.DatabaseURL) == "" {
+		c.DatabaseURL = defaultDatabaseURL
 	}
 
 	if strings.TrimSpace(c.CDPBindHost) == "" {
@@ -166,24 +167,42 @@ func (m *Manager) Start() error {
 		return nil
 	}
 
+	store, err := newPostgresSessionStore(context.Background(), m.config.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("start postgres session store: %w", err)
+	}
+
+	if err := store.markAllActiveClosed(context.Background(), closeReasonManagerStart, time.Now().UTC()); err != nil {
+		_ = store.close()
+		return fmt.Errorf("reset stale active sessions: %w", err)
+	}
+
+	if err := store.markInFlightTasksFailed(context.Background(), "manager restarted before task completed", time.Now().UTC()); err != nil {
+		_ = store.close()
+		return fmt.Errorf("reset stale tasks: %w", err)
+	}
+
 	pw, err := playwright.Run()
 	if err != nil {
+		_ = store.close()
 		return fmt.Errorf("start playwright runtime: %w", err)
 	}
 
-	pool := worker.NewWorkerPool(worker.WorkerPoolConfig{
-		Concurrency:  m.config.WorkerConcurrency,
-		LogPath:      m.config.TaskLogPath,
-		DatabasePath: m.config.TaskDatabasePath,
+	pool := newTaskWorkerPool(taskWorkerPoolConfig{
+		Concurrency: m.config.WorkerConcurrency,
+		LogPath:     m.config.TaskLogPath,
+		Store:       store,
 	})
 
 	if err := pool.Start(); err != nil {
 		_ = pw.Stop()
+		_ = store.close()
 		return fmt.Errorf("start task worker pool: %w", err)
 	}
 
 	m.pw = pw
 	m.pool = pool
+	m.db = store
 	m.started = true
 
 	go m.cleanupLoop()
@@ -206,6 +225,7 @@ func (m *Manager) Stop() error {
 
 		pool := m.pool
 		pw := m.pw
+		db := m.db
 
 		sessions := make([]*session, 0, len(m.sessions))
 		for _, s := range m.sessions {
@@ -213,6 +233,7 @@ func (m *Manager) Stop() error {
 		}
 		m.sessions = make(map[string]*session)
 		m.started = false
+		m.db = nil
 
 		m.mu.Unlock()
 
@@ -223,6 +244,18 @@ func (m *Manager) Stop() error {
 		for _, s := range sessions {
 			if err := s.browser.Close(); err != nil {
 				combinedErr = errors.Join(combinedErr, fmt.Errorf("close browser %s: %w", s.id, err))
+			}
+		}
+
+		if db != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			if err := db.markAllActiveClosed(ctx, closeReasonManagerStop, time.Now().UTC()); err != nil {
+				combinedErr = errors.Join(combinedErr, fmt.Errorf("mark sessions closed during shutdown: %w", err))
+			}
+			cancel()
+
+			if err := db.close(); err != nil {
+				combinedErr = errors.Join(combinedErr, fmt.Errorf("close postgres session store: %w", err))
 			}
 		}
 
@@ -264,9 +297,18 @@ func (m *Manager) CreateBrowser(ctx context.Context, params CreateBrowserParams)
 		resultCh:    make(chan spawnBrowserTaskResult, 1),
 	}
 
-	taskInfo, err := m.pool.AddTask(task)
+	taskInfo, err := m.pool.AddTask(task, browserID, taskKindSpawnBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("enqueue spawn task: %w", err)
+	}
+
+	if err := m.db.insertTaskEvent(ctx, taskEvent{
+		BrowserID: browserID,
+		ProcessID: taskInfo.ProcessID,
+		WorkerID:  taskInfo.WorkerID,
+		EventType: taskEventSpawnRequested,
+	}); err != nil {
+		log.Printf("failed to persist spawn_requested event for browser %s: %v", browserID, err)
 	}
 
 	select {
@@ -336,6 +378,10 @@ func (m *Manager) KeepAlive(browserID string) (*BrowserInfo, error) {
 	s.lastActiveAt = now
 	info := sessionToInfo(s)
 
+	if err := m.db.touchActiveSession(context.Background(), browserID, now); err != nil {
+		log.Printf("failed to persist keepalive for browser %s: %v", browserID, err)
+	}
+
 	return &info, nil
 }
 
@@ -351,9 +397,21 @@ func (m *Manager) CloseBrowser(ctx context.Context, browserID string, closedById
 		resultCh:          make(chan error, 1),
 	}
 
-	taskInfo, err := m.pool.AddTask(task)
+	taskInfo, err := m.pool.AddTask(task, browserID, taskKindCloseBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("enqueue close task: %w", err)
+	}
+
+	if err := m.db.insertTaskEvent(ctx, taskEvent{
+		BrowserID: browserID,
+		ProcessID: taskInfo.ProcessID,
+		WorkerID:  taskInfo.WorkerID,
+		EventType: taskEventCloseRequested,
+		Details: map[string]any{
+			"closedByIdleSweep": closedByIdleSweep,
+		},
+	}); err != nil {
+		log.Printf("failed to persist close_requested event for browser %s: %v", browserID, err)
 	}
 
 	if !closedByIdleSweep {
@@ -414,7 +472,7 @@ func (m *Manager) closeIdleBrowsers() {
 	}
 }
 
-func (m *Manager) closeBrowserNow(browserID string) error {
+func (m *Manager) closeBrowserNow(browserID string, reason closeReason) error {
 	m.mu.Lock()
 	s, ok := m.sessions[browserID]
 	if ok {
@@ -430,14 +488,22 @@ func (m *Manager) closeBrowserNow(browserID string) error {
 		return fmt.Errorf("close browser %s: %w", browserID, err)
 	}
 
+	if err := m.db.closeActiveSession(context.Background(), browserID, reason, time.Now().UTC()); err != nil && !errors.Is(err, errSessionNotFound) {
+		log.Printf("failed to persist close of browser %s: %v", browserID, err)
+	}
+
 	return nil
 }
 
 func (m *Manager) registerDisconnect(browserID string, b playwright.Browser) {
 	b.OnDisconnected(func(playwright.Browser) {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		delete(m.sessions, browserID)
+		m.mu.Unlock()
+
+		if err := m.db.closeActiveSession(context.Background(), browserID, closeReasonDisconnect, time.Now().UTC()); err != nil && !errors.Is(err, errSessionNotFound) {
+			log.Printf("failed to persist disconnected browser %s: %v", browserID, err)
+		}
 	})
 }
 
@@ -445,9 +511,48 @@ func (m *Manager) ensureStarted() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if !m.started || m.pw == nil || m.pool == nil {
+	if !m.started || m.pw == nil || m.pool == nil || m.db == nil {
 		return ErrManagerNotStarted
 	}
+
+	return nil
+}
+
+func (m *Manager) ProxyCDP(w http.ResponseWriter, r *http.Request, port int, requestPath string) error {
+	if err := m.ensureStarted(); err != nil {
+		return err
+	}
+
+	if port < m.config.CDPPortMin || port > m.config.CDPPortMax {
+		return ErrCDPPortOutOfRange
+	}
+
+	targetHost := cdpProbeHost(normalizeCDPBindHost(m.config.CDPBindHost))
+	targetURL := &url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(targetHost, strconv.Itoa(port)),
+	}
+
+	targetPath := "/" + strings.TrimPrefix(requestPath, "/")
+	if strings.TrimSpace(targetPath) == "/" {
+		targetPath = "/"
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.URL.Scheme = targetURL.Scheme
+		req.URL.Host = targetURL.Host
+		req.URL.Path = targetPath
+		req.URL.RawPath = targetPath
+		req.Host = targetURL.Host
+	}
+	proxy.ErrorHandler = func(_ http.ResponseWriter, _ *http.Request, err error) {
+		log.Printf("cdp reverse proxy error for port %d: %v", port, err)
+	}
+
+	proxy.ServeHTTP(w, r)
 
 	return nil
 }
@@ -478,12 +583,31 @@ type spawnBrowserTaskResult struct {
 	err  error
 }
 
-func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContext) error {
+func (t *spawnBrowserTask) Process(ctx context.Context, pc *taskProcessContext) error {
 	_ = pc.Logger(fmt.Sprintf("spawning browser %s", t.browserID))
+
+	recordFailure := func(taskErr error) {
+		if taskErr == nil {
+			return
+		}
+
+		if recordErr := t.manager.db.insertTaskEvent(context.Background(), taskEvent{
+			BrowserID: t.browserID,
+			ProcessID: pc.ProcessID,
+			WorkerID:  &pc.WorkerID,
+			EventType: taskEventSpawnFailed,
+			Details: map[string]any{
+				"error": taskErr.Error(),
+			},
+		}); recordErr != nil {
+			log.Printf("failed to persist spawn_failed event for browser %s: %v", t.browserID, recordErr)
+		}
+	}
 
 	select {
 	case <-ctx.Done():
 		err := ctx.Err()
+		recordFailure(err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	default:
@@ -494,6 +618,7 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	port, err := reserveOpenPortInRange(bindHost, t.manager.config.CDPPortMin, t.manager.config.CDPPortMax)
 	if err != nil {
 		err = fmt.Errorf("reserve open port: %w", err)
+		recordFailure(err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	}
@@ -513,6 +638,7 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	browser, err := t.manager.pw.Chromium.Launch(launchOptions)
 	if err != nil {
 		err = fmt.Errorf("launch chromium: %w", err)
+		recordFailure(err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	}
@@ -533,6 +659,7 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	if err != nil {
 		_ = browser.Close()
 		err = fmt.Errorf("discover cdp websocket url: %w", err)
+		recordFailure(err)
 		t.finish(spawnBrowserTaskResult{err: err})
 		return err
 	}
@@ -558,9 +685,31 @@ func (t *spawnBrowserTask) Process(ctx context.Context, pc *worker.ProcessContex
 	t.manager.mu.Lock()
 	t.manager.sessions[t.browserID] = s
 	t.manager.mu.Unlock()
+
+	info := sessionToInfo(s)
+	if err := t.manager.db.upsertActiveSession(ctx, info); err != nil {
+		_ = browser.Close()
+		t.manager.mu.Lock()
+		delete(t.manager.sessions, t.browserID)
+		t.manager.mu.Unlock()
+		err = fmt.Errorf("persist browser session: %w", err)
+		recordFailure(err)
+		t.finish(spawnBrowserTaskResult{err: err})
+		return err
+	}
+
+	if recordErr := t.manager.db.insertTaskEvent(context.Background(), taskEvent{
+		BrowserID: t.browserID,
+		ProcessID: pc.ProcessID,
+		WorkerID:  &pc.WorkerID,
+		EventType: taskEventSpawnSucceeded,
+	}); recordErr != nil {
+		log.Printf("failed to persist spawn_succeeded event for browser %s: %v", t.browserID, recordErr)
+	}
+
 	t.manager.registerDisconnect(t.browserID, browser)
 
-	result := spawnBrowserTaskResult{info: sessionToInfo(s)}
+	result := spawnBrowserTaskResult{info: info}
 	t.finish(result)
 
 	return nil
@@ -580,18 +729,48 @@ type closeBrowserTask struct {
 	resultCh          chan error
 }
 
-func (t *closeBrowserTask) Process(_ context.Context, pc *worker.ProcessContext) error {
+func (t *closeBrowserTask) Process(_ context.Context, pc *taskProcessContext) error {
 	_ = pc.Logger(fmt.Sprintf("closing browser %s", t.browserID))
 
-	err := t.manager.closeBrowserNow(t.browserID)
+	reason := closeReasonManual
+	if t.closedByIdleSweep {
+		reason = closeReasonIdleSweep
+	}
+
+	err := t.manager.closeBrowserNow(t.browserID, reason)
 
 	if err != nil {
+		if recordErr := t.manager.db.insertTaskEvent(context.Background(), taskEvent{
+			BrowserID: t.browserID,
+			ProcessID: pc.ProcessID,
+			WorkerID:  &pc.WorkerID,
+			EventType: taskEventCloseFailed,
+			Details: map[string]any{
+				"error":             err.Error(),
+				"closedByIdleSweep": t.closedByIdleSweep,
+			},
+		}); recordErr != nil {
+			log.Printf("failed to persist close_failed event for browser %s: %v", t.browserID, recordErr)
+		}
+
 		if errors.Is(err, ErrBrowserNotFound) && t.closedByIdleSweep {
 			t.finish(nil)
 			return nil
 		}
 		t.finish(err)
 		return err
+	}
+
+	if recordErr := t.manager.db.insertTaskEvent(context.Background(), taskEvent{
+		BrowserID: t.browserID,
+		ProcessID: pc.ProcessID,
+		WorkerID:  &pc.WorkerID,
+		EventType: taskEventCloseSucceeded,
+		Details: map[string]any{
+			"closedByIdleSweep": t.closedByIdleSweep,
+		},
+	}); recordErr != nil {
+		log.Printf("failed to persist close_succeeded event for browser %s: %v", t.browserID, recordErr)
 	}
 
 	t.finish(nil)
