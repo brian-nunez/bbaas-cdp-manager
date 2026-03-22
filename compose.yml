@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:18
+    network_mode: "host"
+    environment:
+      POSTGRES_DB: "bbaas_cdp_manager"
+      POSTGRES_USER: "postgres"
+      POSTGRES_PASSWORD: "postgres"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bbaas_cdp_manager -h 127.0.0.1 -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 8
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   bbaas-cdp-manager:
     build:
       context: .
@@ -7,7 +22,11 @@ services:
     ports:
       - "8080:8080"
     network_mode: "host"
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
+      DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/bbaas_cdp_manager?sslmode=disable"
       CDP_BIND_HOST: "127.0.0.1"
       # CDP_PUBLIC_HOST: "bbaas-browser-manager.b8z.me"
       CDP_PUBLIC_HOST: "localhost"
@@ -16,5 +35,7 @@ services:
       BROWSER_IDLE_TIMEOUT: "1m"
       TASK_WORKER_CONCURRENCY: "1"
       TASK_LOG_PATH: "./logs"
-      TASK_DB_PATH: "./tasks.db"
       PLAYWRIGHT_HEADLESS: "true"
+
+volumes:
+  postgres-data:

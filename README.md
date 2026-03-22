@@ -6,7 +6,8 @@ This service is a thin browser lifecycle manager:
 - Exposes CDP connection URLs per browser.
 - Auto-closes idle browsers (default: 1 minute).
 - Provides a small HTTP API for spawn/inspect/keepalive/close.
-- Uses `github.com/brian-nunez/task-orchestration` for spawn/close task execution.
+- Uses an internal worker pool for spawn/close task execution.
+- Persists browser sessions, task state, task events, and task log contents in PostgreSQL.
 
 ## API
 
@@ -76,12 +77,14 @@ Basic health response.
 - `CDP_PORT_MIN` (default `20000`)
 - `CDP_PORT_MAX` (default `29999`)
 - `TASK_WORKER_CONCURRENCY` (default `4`)
-- `TASK_DB_PATH` (default `./tasks.db`)
+- `DATABASE_URL` (default `postgres://postgres:postgres@localhost:5432/bbaas_cdp_manager?sslmode=disable`)
 - `TASK_LOG_PATH` (default `./logs`)
+
+Task lifecycle state and task log contents are persisted in PostgreSQL.
 
 ## CDP Networking Notes
 
 - Chromium CDP is launched on loopback (`127.0.0.1`) by default for reliability.
 - CDP ports are allocated from a dedicated range (`CDP_PORT_MIN`-`CDP_PORT_MAX`) to avoid collisions with OS ephemeral outbound ports.
 - The service still returns externally-usable CDP URLs by rewriting host to `CDP_PUBLIC_HOST` while preserving each browser's dynamic port.
-- For public access without exposing high ports, use an HTTP path translator proxy (for example `/<port>/... -> 127.0.0.1:<port>/...`) on the BBAAS machine.
+- The service now supports direct path translation on the same port: `/<port>/... -> 127.0.0.1:<port>/...`.

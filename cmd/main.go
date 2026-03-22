@@ -27,7 +27,7 @@ func main() {
 		CleanupInterval:    durationEnvOrDefault("BROWSER_CLEANUP_INTERVAL", 5*time.Second),
 		WorkerConcurrency:  intEnvOrDefault("TASK_WORKER_CONCURRENCY", 4),
 		TaskLogPath:        envOrDefault("TASK_LOG_PATH", "./logs"),
-		TaskDatabasePath:   envOrDefault("TASK_DB_PATH", "./tasks.db"),
+		DatabaseURL:        envOrPanic("DATABASE_URL"),
 		CDPBindHost:        cdpBindHost,
 		CDPPublicHost:      cdpPublicHost,
 		CDPPortMin:         cdpPortMin,
@@ -82,6 +82,15 @@ func envOrDefault(key, fallback string) string {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return fallback
+	}
+
+	return value
+}
+
+func envOrPanic(key string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		panic(fmt.Errorf("Environment variable is not set '%v'", key))
 	}
 
 	return value
